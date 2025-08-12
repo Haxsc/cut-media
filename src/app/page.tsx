@@ -34,6 +34,7 @@ export default function Home() {
   const [videoName, setVideoName] = useState<string>("");
   const [calibration, setCalibration] = useState<boolean>(false);
   const [modelChoice, setModelChoice] = useState<string>("diurno");
+  const [maxFrames, setMaxFrames] = useState<number>(0);
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -46,6 +47,26 @@ export default function Home() {
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
+  }
+
+  // Helper function to get time description from frames (30fps standard)
+  function getTimeDescription(frames: number) {
+    if (frames === 0) return "Vídeo completo";
+    const seconds = frames / 30; // 30 FPS padrão
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.round(seconds % 60);
+    return remainingSeconds > 0
+      ? `${minutes}m ${remainingSeconds}s`
+      : `${minutes}m`;
+  }
+
+  // Convert frames to seconds for slider (30fps standard)
+  const maxSeconds = 1800; // 30 minutes max
+  const currentSeconds = maxFrames / 30; // Conversão exata para 30 FPS
+
+  function handleSliderChange(seconds: number) {
+    setMaxFrames(seconds * 30); // 30 frames por segundo
   }
 
   return (
@@ -228,31 +249,81 @@ export default function Home() {
           <section className="glass rounded-2xl p-6">
             <h2 className="text-lg font-medium mb-4">Parâmetros</h2>
             <form ref={formRef} onSubmit={onSubmit} className="grid gap-5">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-muted mb-2">
-                    FPS (0 = detectar)
-                  </label>
+              <div>
+                <label className="block text-sm text-muted mb-3">
+                  Duração para processar
+                </label>
+
+                {/* Slider control */}
+                <div className="mb-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-sm text-foreground font-medium">
+                      {getTimeDescription(maxFrames)}
+                    </span>
+                    <span className="text-xs text-muted">
+                      {Math.floor(currentSeconds / 60)}:
+                      {String(Math.round(currentSeconds % 60)).padStart(2, "0")}
+                    </span>
+                  </div>
+
                   <input
-                    name="fps"
-                    type="number"
-                    min={0}
-                    defaultValue={0}
-                    className="field ring-brand"
+                    type="range"
+                    min="0"
+                    max={maxSeconds}
+                    step="30"
+                    value={currentSeconds}
+                    onChange={(e) =>
+                      handleSliderChange(parseInt(e.target.value))
+                    }
+                    className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer slider"
                   />
+
+                  <div className="flex justify-between text-xs text-muted mt-2">
+                    <span>0s</span>
+                    <span>15m</span>
+                    <span>30m</span>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm text-muted mb-2">
-                    Máx. frames (0 = ilimitado)
-                  </label>
-                  <input
-                    name="maxframes"
-                    type="number"
-                    min={0}
-                    defaultValue={0}
-                    className="field ring-brand"
-                  />
+
+                {/* Visual feedback */}
+                <div className="p-3 rounded-lg bg-white/5 border border-white/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-muted">
+                      {maxFrames === 0
+                        ? "Vídeo completo será processado"
+                        : "Processamento limitado"}
+                    </span>
+                    <span className="text-xs text-muted">
+                      {maxFrames === 0 ? "∞" : `${maxFrames.toLocaleString()}`}{" "}
+                      frames
+                    </span>
+                  </div>
+
+                  {/* Progress bar visual */}
+                  <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[var(--brand)] transition-all duration-300 ease-out"
+                      style={{
+                        width:
+                          maxFrames === 0
+                            ? "100%"
+                            : `${Math.min(
+                                (currentSeconds / maxSeconds) * 100,
+                                100
+                              )}%`,
+                      }}
+                    />
+                  </div>
+
+                  {maxFrames > 0 && (
+                    <div className="mt-2 text-xs text-muted">
+                      Processamento estimado: ~{Math.round(currentSeconds / 60)}{" "}
+                      minuto(s) | 30 FPS
+                    </div>
+                  )}
                 </div>
+
+                <input type="hidden" name="maxframes" value={maxFrames} />
               </div>
 
               <div>

@@ -141,3 +141,62 @@ select.field {
 select.field::-ms-expand {
   display: none; /* hide default arrow on old Edge/IE */
 }
+
+/* Custom slider styles */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+  outline: none;
+  border-radius: 0.5rem;
+  transition: border-color 150ms ease;
+}
+
+.slider:hover {
+  border-color: color-mix(in oklab, var(--surface-border) 60%, white);
+}
+
+.slider:focus {
+  border-color: var(--brand-600);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brand);
+  cursor: pointer;
+  border: 2px solid var(--background);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  background: var(--brand-600);
+  transform: scale(1.1);
+}
+
+.slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brand);
+  cursor: pointer;
+  border: 2px solid var(--background);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+
+.slider::-moz-range-thumb:hover {
+  background: var(--brand-600);
+  transform: scale(1.1);
+}
+
+.slider::-moz-range-track {
+  background: transparent;
+  border: none;
+}
