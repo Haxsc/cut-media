@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "cleanup-api-and-python",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Remove-Item -Recurse -Force src\\app\\api; if (Test-Path python) { Remove-Item -Recurse -Force python }"
+			]
+		}
+	]
+}
