@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import Select from "@/components/Select";
+import { API_CONFIG, buildApiUrl } from "@/lib/api-config";
 
 const classesList = [
   { id: 0, label: "Carro" },
@@ -32,15 +33,148 @@ export default function Home() {
   const formRef = useRef<HTMLFormElement>(null);
   const [selected, setSelected] = useState<number[]>([]);
   const [videoName, setVideoName] = useState<string>("");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   const [calibration, setCalibration] = useState<boolean>(false);
   const [modelChoice, setModelChoice] = useState<string>("diurno");
   const [maxFrames, setMaxFrames] = useState<number>(0);
 
-  function onSubmit(e: React.FormEvent) {
+  // Processing states
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [processingStage, setProcessingStage] = useState<string>("");
+  const [processingProgress, setProcessingProgress] = useState<number>(0);
+  const [error, setError] = useState<string>("");
+  const [jobId, setJobId] = useState<string>("");
+
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    alert(
-      "Somente UI ativa. Integração com processamento será adicionada depois."
-    );
+
+    if (!videoFile) {
+      setError("Selecione um vídeo primeiro");
+      return;
+    }
+
+    if (selected.length === 0) {
+      setError("Selecione pelo menos uma classe");
+      return;
+    }
+
+    setError("");
+    setIsProcessing(true);
+    setProcessingProgress(0);
+
+    try {
+      // Stage 1: Upload and start processing
+      setProcessingStage("Enviando vídeo e iniciando processamento...");
+      setProcessingProgress(10);
+
+      const formData = new FormData();
+      formData.append("video", videoFile);
+      formData.append("calibration", calibration ? "sim" : "nao");
+      formData.append("model", modelChoice);
+      formData.append("maxframes", maxFrames.toString());
+      formData.append("classes", selected.join(","));
+
+      const uploadResponse = await fetch(
+        buildApiUrl(API_CONFIG.ENDPOINTS.UPLOAD),
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      if (!uploadResponse.ok) {
+        const errorData = await uploadResponse.json();
+        throw new Error(errorData.detail || "Erro no upload");
+      }
+
+      const { id: newJobId } = await uploadResponse.json();
+      setJobId(newJobId);
+      setProcessingProgress(25);
+
+      // Stage 2: Poll for completion
+      await pollProcessingStatus(newJobId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro desconhecido");
+      setIsProcessing(false);
+      setProcessingStage("");
+      setProcessingProgress(0);
+    }
+  }
+
+  async function pollProcessingStatus(jobId: string) {
+    setProcessingStage("Processando vídeo com IA...");
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusResponse = await fetch(
+          buildApiUrl(API_CONFIG.ENDPOINTS.STATUS, { id: jobId })
+        );
+        const status = await statusResponse.json();
+
+        if (status.stage) {
+          setProcessingStage(status.stage);
+        }
+
+        if (status.progress !== undefined) {
+          setProcessingProgress(Math.min(status.progress, 90));
+        }
+
+        if (status.status === "completed") {
+          clearInterval(pollInterval);
+          setProcessingStage("Download iniciando...");
+          setProcessingProgress(95);
+
+          // Auto download
+          await downloadProcessedVideo(jobId);
+
+          setProcessingProgress(100);
+          setProcessingStage("Concluído!");
+
+          // Reset after 3 seconds
+          setTimeout(() => {
+            setIsProcessing(false);
+            setProcessingStage("");
+            setProcessingProgress(0);
+            setJobId("");
+          }, 3000);
+        }
+
+        if (status.status === "failed" || status.error) {
+          clearInterval(pollInterval);
+          throw new Error(status.error || "Erro no processamento");
+        }
+      } catch (err) {
+        clearInterval(pollInterval);
+        setError(err instanceof Error ? err.message : "Erro no status");
+        setIsProcessing(false);
+        setProcessingStage("");
+        setProcessingProgress(0);
+      }
+    }, API_CONFIG.POLLING.INTERVAL);
+  }
+
+  async function downloadProcessedVideo(jobId: string) {
+    try {
+      const response = await fetch(
+        buildApiUrl(API_CONFIG.ENDPOINTS.DOWNLOAD, { id: jobId })
+      );
+
+      if (!response.ok) {
+        throw new Error("Erro no download");
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${videoName.split(".")[0]}_processed.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      throw new Error("Falha no download automático");
+    }
   }
 
   function toggleClass(id: number) {
@@ -98,7 +232,11 @@ export default function Home() {
             <div className="mb-6">
               <label
                 htmlFor="video"
-                className="relative block group border-2 border-dashed border-white/20 rounded-2xl p-8 cursor-pointer text-center hover:border-[var(--brand)]/60 hover:bg-[var(--brand)]/5 transition-all duration-200"
+                className={`relative block group border-2 border-dashed rounded-2xl p-8 text-center transition-all duration-200 ${
+                  isProcessing
+                    ? "border-white/10 cursor-not-allowed opacity-50"
+                    : "border-white/20 cursor-pointer hover:border-[var(--brand)]/60 hover:bg-[var(--brand)]/5"
+                }`}
               >
                 <div className="flex flex-col items-center gap-4">
                   {/* Icon */}
@@ -133,7 +271,7 @@ export default function Home() {
 
                   {/* File formats */}
                   <div className="flex gap-2 mt-2">
-                    {["MP4", "MOV", "AVI"].map((format) => (
+                    {["MP4", "MOV", "AVI", "DAV"].map((format) => (
                       <span
                         key={format}
                         className="px-2 py-1 text-xs bg-white/10 text-muted rounded-md border border-white/10"
@@ -151,10 +289,16 @@ export default function Home() {
                   type="file"
                   accept="video/*"
                   className="sr-only"
-                  onChange={(e) =>
-                    setVideoName(e.target.files?.[0]?.name ?? "")
-                  }
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      setVideoName(file.name);
+                      setVideoFile(file);
+                      setError(""); // Clear any previous errors
+                    }
+                  }}
                   required
+                  disabled={isProcessing}
                 />
               </label>
 
@@ -208,6 +352,7 @@ export default function Home() {
                     }`}
                     aria-pressed={!calibration}
                     onClick={() => setCalibration(false)}
+                    disabled={isProcessing}
                   >
                     Não
                   </button>
@@ -218,6 +363,7 @@ export default function Home() {
                     }`}
                     aria-pressed={calibration}
                     onClick={() => setCalibration(true)}
+                    disabled={isProcessing}
                   >
                     Sim
                   </button>
@@ -240,6 +386,7 @@ export default function Home() {
                   value={modelChoice}
                   onChange={setModelChoice}
                   options={yoloOptions}
+                  disabled={isProcessing}
                 />
               </div>
             </div>
@@ -276,6 +423,7 @@ export default function Home() {
                       handleSliderChange(parseInt(e.target.value))
                     }
                     className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer slider"
+                    disabled={isProcessing}
                   />
 
                   <div className="flex justify-between text-xs text-muted mt-2">
@@ -336,7 +484,8 @@ export default function Home() {
                         key={c.id}
                         type="button"
                         onClick={() => toggleClass(c.id)}
-                        className={`px-3 py-1.5 rounded-full border text-xs transition-colors ${
+                        disabled={isProcessing}
+                        className={`px-3 py-1.5 rounded-full border text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                           active
                             ? "bg-[var(--brand)] text-white border-transparent"
                             : "bg-white/5 text-foreground/90 border-white/10 hover:border-[var(--brand)]/40"
@@ -355,16 +504,56 @@ export default function Home() {
               </div>
 
               <div className="flex items-center justify-between pt-2">
-                <p className="text-xs text-muted">
-                  Esta é uma prévia somente UI. O processamento será conectado
-                  depois.
-                </p>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-[var(--brand)] hover:bg-[var(--brand-600)] transition-colors"
-                >
-                  Processar
-                </button>
+                {!isProcessing ? (
+                  <>
+                    <p className="text-xs text-muted">
+                      {error ? (
+                        <span className="text-red-400">{error}</span>
+                      ) : (
+                        "Configure os parâmetros e clique em processar"
+                      )}
+                    </p>
+                    <button
+                      type="submit"
+                      disabled={!videoFile || selected.length === 0}
+                      className="px-4 py-2 rounded-lg bg-[var(--brand)] hover:bg-[var(--brand-600)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Processar
+                    </button>
+                  </>
+                ) : (
+                  <div className="w-full">
+                    {/* Processing status */}
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm text-foreground font-medium">
+                        {processingStage}
+                      </span>
+                      <span className="text-xs text-muted">
+                        {processingProgress}%
+                      </span>
+                    </div>
+
+                    {/* Progress bar */}
+                    <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--brand)] transition-all duration-500 ease-out"
+                        style={{ width: `${processingProgress}%` }}
+                      />
+                    </div>
+
+                    {/* Processing details */}
+                    <div className="mt-3 p-3 rounded-lg bg-white/5 border border-white/10">
+                      <div className="flex items-center gap-3">
+                        <div className="h-5 w-5 rounded-full border-2 border-[var(--brand)] border-t-transparent animate-spin"></div>
+                        <div className="text-xs text-muted">
+                          <div>Job ID: {jobId}</div>
+                          <div>Arquivo: {videoName}</div>
+                          <div>Classes: {selected.length} selecionadas</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </form>
           </section>

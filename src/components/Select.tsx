@@ -10,6 +10,7 @@ type Props = {
   placeholder?: string;
   ariaLabel?: string;
   className?: string;
+  disabled?: boolean;
 };
 
 export default function Select({
@@ -19,6 +20,7 @@ export default function Select({
   placeholder = "Selecione...",
   ariaLabel,
   className = "",
+  disabled = false,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState<number>(() =>
@@ -54,6 +56,7 @@ export default function Select({
   );
 
   function commit(val: string) {
+    if (disabled) return;
     onChange?.(val);
     setOpen(false);
     // return focus to button for accessibility
@@ -61,6 +64,8 @@ export default function Select({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
+    if (disabled) return;
+    
     if (
       !open &&
       (e.key === "ArrowDown" ||
@@ -109,8 +114,11 @@ export default function Select({
         aria-expanded={open}
         aria-controls={listboxId}
         aria-label={ariaLabel}
-        className="field ring-brand text-left flex items-center gap-2 pr-10"
-        onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
+        className={`field ring-brand text-left flex items-center gap-2 pr-10 ${
+          disabled ? "opacity-50 cursor-not-allowed" : ""
+        }`}
+        onClick={() => !disabled && setOpen((o) => !o)}
         onKeyDown={onKeyDown}
       >
         <span className="truncate text-sm">
