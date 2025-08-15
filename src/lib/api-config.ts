@@ -19,8 +19,10 @@ export const API_CONFIG = {
 
   // Configurações de upload
   UPLOAD: {
-    MAX_SIZE: 1024 * 1024 * 1024, // 1GB
+    MAX_SIZE: 5 * 1024 * 1024 * 1024, // 5GB
     ACCEPTED_TYPES: ["video/mp4", "video/mov", "video/avi", "video/x-msvideo"],
+    TIMEOUT: 600000, // 10 minutos para uploads grandes
+    CHUNK_SIZE: 8192 * 1024, // 8MB chunks
   },
 };
 

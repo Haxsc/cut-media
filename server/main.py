@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -12,7 +12,14 @@ from pathlib import Path
 import asyncio
 from typing import Optional, List
 
-app = FastAPI(title="Cut Media API", description="API para processamento de vídeos com YOLO")
+app = FastAPI(
+    title="Cut Media API", 
+    description="API para processamento de vídeos com YOLO"
+)
+
+# Configurações para uploads grandes
+app.state.max_file_size = 5 * 1024 * 1024 * 1024  # 5GB limit
+app.state.timeout = 300  # 5 minutes timeout
 
 origins = [
     "http://192.168.100.194:3000",
@@ -26,6 +33,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Middleware para logging de requests grandes
+@app.middleware("http")
+async def log_large_uploads(request: Request, call_next):
+    start_time = datetime.now()
+    
+    # Log inicio do request
+    if request.url.path == "/api/upload":
+        print(f"🔄 Upload iniciado em {start_time}")
+        
+        # Check content length
+        content_length = request.headers.get("content-length")
+        if content_length:
+            size_mb = int(content_length) / (1024 * 1024)
+            print(f"📏 Tamanho do upload: {size_mb:.2f} MB")
+            
+            # Verificar se excede limite
+            if int(content_length) > app.state.max_file_size:
+                print(f"❌ Arquivo muito grande: {size_mb:.2f} MB (limite: {app.state.max_file_size / (1024 * 1024 * 1024):.1f} GB)")
+                raise HTTPException(status_code=413, detail=f"Arquivo muito grande. Limite: {app.state.max_file_size / (1024 * 1024 * 1024):.1f} GB")
+    
+    # Processar request
+    response = await call_next(request)
+    
+    # Log fim do request
+    if request.url.path == "/api/upload":
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        print(f"✅ Upload concluído em {duration:.2f} segundos")
+    
+    return response
 
 # Diretórios
 UPLOAD_DIR = Path("uploads")
@@ -60,6 +98,10 @@ YOLO_MODELS = {
 # Storage para jobs em memória (em produção, usar Redis ou banco de dados)
 jobs_status = {}
 
+# Configuração para limpeza automática (pode ser desabilitada)
+AUTO_CLEANUP_AFTER_DOWNLOAD = True
+CLEANUP_DELAY_SECONDS = 5
+
 class JobStatus:
     def __init__(self, job_id: str, file_name: str, parameters: dict):
         self.id = job_id
@@ -84,9 +126,20 @@ async def upload_video(
 ):
     """Upload de vídeo e início do processamento"""
     
+    print(f"🔄 Processando upload: {video.filename}")
+    print(f"📄 Content-Type: {video.content_type}")
+    print(f"📊 Tamanho reportado: {video.size if hasattr(video, 'size') else 'desconhecido'}")
+    
     # Validações
-    if not video.content_type.startswith("video/"):
-        raise HTTPException(status_code=400, detail="Arquivo deve ser um vídeo")
+    # Aceitar arquivos de vídeo ou .dav (formato de câmeras de segurança)
+    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.dav', '.DAV']
+    is_video_content = video.content_type and video.content_type.startswith("video/")
+    is_dav_file = video.filename and any(video.filename.lower().endswith(ext.lower()) for ext in ['.dav'])
+    
+    if not (is_video_content or is_dav_file):
+        error_msg = f"Arquivo deve ser um vídeo ou arquivo .DAV. Recebido: {video.content_type}"
+        print(f"❌ {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
     
     if model not in YOLO_MODELS:
         raise HTTPException(status_code=400, detail=f"Modelo '{model}' não suportado")
@@ -96,10 +149,37 @@ async def upload_video(
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(exist_ok=True)
     
-    # Salvar arquivo de vídeo
-    video_path = job_dir / "input.mp4"
-    with open(video_path, "wb") as buffer:
-        shutil.copyfileobj(video.file, buffer)
+    print(f"📁 Criado diretório: {job_dir}")
+    
+    try:
+        # Salvar arquivo de vídeo com progresso
+        video_path = job_dir / "input.mp4"
+        total_size = 0
+        
+        print(f"💾 Salvando arquivo: {video_path}")
+        
+        with open(video_path, "wb") as buffer:
+            # Ler arquivo em chunks para arquivos grandes
+            chunk_size = 8192 * 1024  # 8MB chunks
+            while True:
+                chunk = await video.read(chunk_size)
+                if not chunk:
+                    break
+                buffer.write(chunk)
+                total_size += len(chunk)
+                
+                # Log progresso a cada 100MB
+                if total_size % (100 * 1024 * 1024) == 0:
+                    print(f"📊 Progresso: {total_size / (1024 * 1024):.1f} MB")
+        
+        print(f"✅ Arquivo salvo: {total_size / (1024 * 1024):.2f} MB")
+        
+    except Exception as e:
+        print(f"❌ Erro ao salvar arquivo: {str(e)}")
+        # Limpar diretório em caso de erro
+        if job_dir.exists():
+            shutil.rmtree(job_dir)
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar arquivo: {str(e)}")
     
     # Parsear classes
     classes_list = []
@@ -298,7 +378,8 @@ async def download_video(id: str):
     filename = f"{job.file_name.split('.')[0]}_processed.mp4"
     print(f"[Download] Nome do arquivo para download: {filename}")
     
-    return FileResponse(
+    # Criar resposta do arquivo
+    response = FileResponse(
         path=str(output_path),
         media_type="video/mp4",
         filename=filename,
@@ -307,6 +388,38 @@ async def download_video(id: str):
             "Access-Control-Expose-Headers": "Content-Disposition"
         }
     )
+    
+    # Agendar limpeza do job após o download (se habilitado)
+    if AUTO_CLEANUP_AFTER_DOWNLOAD:
+        import asyncio
+        asyncio.create_task(cleanup_job_after_download(id))
+        print(f"[Download] Limpeza automática agendada para job {id}")
+    
+    return response
+
+async def cleanup_job_after_download(job_id: str):
+    """Limpa o job após um pequeno delay para garantir que o download foi iniciado"""
+    try:
+        # Aguardar para garantir que o download foi iniciado
+        await asyncio.sleep(CLEANUP_DELAY_SECONDS)
+        
+        print(f"[Cleanup] Iniciando limpeza do job {job_id}")
+        
+        # Remover arquivos
+        job_dir = JOBS_DIR / job_id
+        if job_dir.exists():
+            shutil.rmtree(job_dir)
+            print(f"[Cleanup] Diretório removido: {job_dir}")
+        
+        # Remover do status
+        if job_id in jobs_status:
+            del jobs_status[job_id]
+            print(f"[Cleanup] Job {job_id} removido da memória")
+        
+        print(f"[Cleanup] Job {job_id} limpo com sucesso")
+        
+    except Exception as e:
+        print(f"[Cleanup] Erro ao limpar job {job_id}: {str(e)}")
 
 @app.get("/api/file-info/{job_id}")
 async def get_file_info(job_id: str):
@@ -348,7 +461,9 @@ async def list_jobs():
                 "created_at": job.created_at
             }
             for job in jobs_status.values()
-        ]
+        ],
+        "total_jobs": len(jobs_status),
+        "auto_cleanup_enabled": AUTO_CLEANUP_AFTER_DOWNLOAD
     }
 
 @app.delete("/api/jobs/{job_id}")
@@ -372,9 +487,35 @@ async def root():
     return {
         "message": "Cut Media API",
         "version": "1.0.0",
-        "docs": "/docs"
+        "docs": "/docs",
+        "status": "healthy"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint para Docker"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0",
+        "auto_cleanup": AUTO_CLEANUP_AFTER_DOWNLOAD,
+        "cleanup_delay": CLEANUP_DELAY_SECONDS
     }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    print("🚀 Iniciando Cut Media API com configurações para uploads grandes...")
+    print("📊 Limite de upload: 5GB")
+    print("⏱️ Timeout: 10 minutos")
+    print("🌐 Servidor: http://0.0.0.0:8000")
+    print("📖 Documentação: http://0.0.0.0:8000/docs")
+    
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        timeout_keep_alive=600,  # 10 minutes
+        limit_max_requests=1000,
+        access_log=True
+    )

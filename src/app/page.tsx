@@ -36,7 +36,7 @@ export default function Home() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [calibration, setCalibration] = useState<boolean>(false);
   const [modelChoice, setModelChoice] = useState<string>("diurno");
-  const [maxFrames, setMaxFrames] = useState<number>(0);
+  const [maxFrames, setMaxFrames] = useState<number>(150); // 5 seconds default (5 * 30fps)
 
   // Processing states
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -49,6 +49,13 @@ export default function Home() {
   const [pollingIntervalRef, setPollingIntervalRef] =
     useState<NodeJS.Timeout | null>(null);
 
+  // Video cutting states
+  const [enableVideoCutting, setEnableVideoCutting] = useState<boolean>(false);
+  const [startTime, setStartTime] = useState<number>(0);
+  const [endTime, setEndTime] = useState<number>(0);
+  const [videoDuration, setVideoDuration] = useState<number>(0);
+  const [isProcessingVideo, setIsProcessingVideo] = useState<boolean>(false);
+
   // Cleanup polling on unmount
   useEffect(() => {
     return () => {
@@ -57,6 +64,134 @@ export default function Home() {
       }
     };
   }, [pollingIntervalRef]);
+
+  // Get video duration when file is selected
+  const getVideoDuration = (file: File): Promise<number> => {
+    return new Promise((resolve) => {
+      const video = document.createElement("video");
+      video.preload = "metadata";
+
+      video.onloadedmetadata = () => {
+        window.URL.revokeObjectURL(video.src);
+        resolve(video.duration);
+      };
+
+      video.src = URL.createObjectURL(file);
+    });
+  };
+
+  // Cut video using Canvas and MediaRecorder (browser-based cutting)
+  const cutVideoInBrowser = async (
+    file: File,
+    startSec: number,
+    endSec: number
+  ): Promise<File> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const video = document.createElement("video");
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+
+        if (!ctx) {
+          reject(new Error("Canvas context not available"));
+          return;
+        }
+
+        video.onloadedmetadata = () => {
+          try {
+            canvas.width = Math.min(video.videoWidth, 1920); // Limit resolution
+            canvas.height = Math.min(video.videoHeight, 1080);
+
+            const stream = canvas.captureStream(25); // 25 FPS for better performance
+
+            // Check if MediaRecorder supports webm
+            let mimeType = "video/webm;codecs=vp8";
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+              mimeType = "video/webm";
+            }
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+              mimeType = "video/mp4";
+            }
+
+            const mediaRecorder = new MediaRecorder(stream, { mimeType });
+            const chunks: BlobPart[] = [];
+            let recordingStarted = false;
+
+            mediaRecorder.ondataavailable = (event) => {
+              if (event.data.size > 0) {
+                chunks.push(event.data);
+              }
+            };
+
+            mediaRecorder.onstop = () => {
+              try {
+                const blob = new Blob(chunks, { type: mimeType });
+                const fileExtension = mimeType.includes("webm")
+                  ? ".webm"
+                  : ".mp4";
+                const cutFile = new File(
+                  [blob],
+                  file.name.replace(
+                    /\.[^/.]+$/,
+                    `_cut_${startSec}-${endSec}s${fileExtension}`
+                  ),
+                  {
+                    type: mimeType,
+                  }
+                );
+                resolve(cutFile);
+              } catch (error) {
+                reject(error);
+              }
+            };
+
+            mediaRecorder.onerror = (event) => {
+              reject(new Error("MediaRecorder error: " + event));
+            };
+
+            // Function to draw video frame to canvas
+            const drawFrame = () => {
+              if (video.paused || video.ended || video.currentTime >= endSec) {
+                if (recordingStarted) {
+                  mediaRecorder.stop();
+                }
+                return;
+              }
+
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              requestAnimationFrame(drawFrame);
+            };
+
+            // Seek to start time
+            video.currentTime = startSec;
+
+            video.onseeked = () => {
+              if (!recordingStarted && video.currentTime >= startSec) {
+                recordingStarted = true;
+                mediaRecorder.start(100); // Collect data every 100ms
+                video.play();
+                drawFrame();
+              }
+            };
+          } catch (error) {
+            reject(error);
+          }
+        };
+
+        video.onerror = () =>
+          reject(new Error("Erro ao carregar vídeo para corte"));
+        video.crossOrigin = "anonymous";
+        video.src = URL.createObjectURL(file);
+
+        // Timeout fallback
+        setTimeout(() => {
+          reject(new Error("Timeout no corte de vídeo"));
+        }, 60000); // 1 minute timeout
+      } catch (error) {
+        reject(error);
+      }
+    });
+  };
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -71,33 +206,82 @@ export default function Home() {
       return;
     }
 
+    if (
+      enableVideoCutting &&
+      (startTime >= endTime || endTime > videoDuration)
+    ) {
+      setError("Tempo de corte inválido");
+      return;
+    }
+
     setError("");
     setIsProcessing(true);
     setProcessingProgress(0);
 
     try {
+      let fileToUpload = videoFile;
+
+      // Stage 0: Cut video if enabled
+      if (enableVideoCutting && startTime < endTime) {
+        setProcessingStage("Cortando vídeo no navegador...");
+        setIsProcessingVideo(true);
+        setProcessingProgress(5);
+
+        try {
+          fileToUpload = await cutVideoInBrowser(videoFile, startTime, endTime);
+          setProcessingProgress(15);
+          setProcessingStage("Vídeo cortado com sucesso");
+        } catch (cutError) {
+          console.warn("Erro ao cortar vídeo no navegador:", cutError);
+          setError("Falha ao cortar vídeo. Enviando vídeo original...");
+          // Continue com o vídeo original
+        }
+
+        setIsProcessingVideo(false);
+      }
+
       // Stage 1: Upload and start processing
       setProcessingStage("Enviando vídeo e iniciando processamento...");
-      setProcessingProgress(10);
+      setProcessingProgress(20);
 
       const formData = new FormData();
-      formData.append("video", videoFile);
+      formData.append("video", fileToUpload);
       formData.append("calibration", calibration ? "sim" : "nao");
       formData.append("model", modelChoice);
       formData.append("maxframes", maxFrames.toString());
       formData.append("classes", selected.join(","));
+
+      console.log(
+        `🔄 Iniciando upload de ${fileToUpload.name} (${(
+          fileToUpload.size /
+          (1024 * 1024)
+        ).toFixed(2)} MB)`
+      );
 
       const uploadResponse = await fetch(
         buildApiUrl(API_CONFIG.ENDPOINTS.UPLOAD),
         {
           method: "POST",
           body: formData,
+          signal: AbortSignal.timeout(API_CONFIG.UPLOAD.TIMEOUT), // 10 minutes timeout
         }
       );
 
       if (!uploadResponse.ok) {
-        const errorData = await uploadResponse.json();
-        throw new Error(errorData.detail || "Erro no upload");
+        const errorText = await uploadResponse.text();
+        let errorDetail;
+
+        try {
+          const errorData = JSON.parse(errorText);
+          errorDetail = errorData.detail || "Erro no upload";
+        } catch {
+          errorDetail = errorText || "Erro no upload";
+        }
+
+        console.error(
+          `❌ Erro no upload: ${uploadResponse.status} - ${errorDetail}`
+        );
+        throw new Error(`Erro ${uploadResponse.status}: ${errorDetail}`);
       }
 
       const { id: newJobId } = await uploadResponse.json();
@@ -177,6 +361,7 @@ export default function Home() {
     setJobId("");
     setIsDownloading(false);
     setDownloadCompleted(false);
+    setIsProcessingVideo(false);
     setError("");
     if (pollingIntervalRef) {
       clearInterval(pollingIntervalRef);
@@ -214,10 +399,17 @@ export default function Home() {
       setProcessingStage("Download concluído!");
       console.log(`[Download] Arquivo baixado com sucesso`);
 
-      // Reset após 2 segundos
+      // Mostrar mensagem sobre limpeza automática
+      setTimeout(() => {
+        setProcessingStage(
+          "Arquivo baixado - Limpeza automática em progresso..."
+        );
+      }, 1000);
+
+      // Reset após 6 segundos (tempo para limpeza no servidor)
       setTimeout(() => {
         resetProcessingState();
-      }, 2000);
+      }, 6000);
     } catch (error) {
       console.error(`[Download] Erro:`, error);
       setError("Falha no download");
@@ -233,7 +425,6 @@ export default function Home() {
 
   // Helper function to get time description from frames (30fps standard)
   function getTimeDescription(frames: number) {
-    if (frames === 0) return "Vídeo completo";
     const seconds = frames / 30; // 30 FPS padrão
     if (seconds < 60) return `${Math.round(seconds)}s`;
     const minutes = Math.floor(seconds / 60);
@@ -244,11 +435,13 @@ export default function Home() {
   }
 
   // Convert frames to seconds for slider (30fps standard)
-  const maxSeconds = 1800; // 30 minutes max
-  const currentSeconds = maxFrames / 30; // Conversão exata para 30 FPS
+  const maxSeconds = 600; // 10 minutes max
+  const minSeconds = 5; // 5 seconds minimum (never 0)
+  const currentSeconds = Math.max(minSeconds, maxFrames / 30); // Conversão exata para 30 FPS
 
   function handleSliderChange(seconds: number) {
-    setMaxFrames(seconds * 30); // 30 frames por segundo
+    const adjustedSeconds = Math.max(minSeconds, seconds); // Ensure minimum 5 seconds
+    setMaxFrames(adjustedSeconds * 30); // 30 frames por segundo
   }
 
   return (
@@ -328,21 +521,52 @@ export default function Home() {
                       </span>
                     ))}
                   </div>
-                  <p className="text-xs text-muted/80">Tamanho máximo: 1 GB</p>
+                  <p className="text-xs text-muted/80">Tamanho máximo: 5 GB</p>
+                  <p className="text-xs text-amber-400/80">
+                    📹 Arquivos .DAV são suportados, mas o corte de vídeo pode
+                    não funcionar
+                  </p>
                 </div>
 
                 <input
                   id="video"
                   name="video"
                   type="file"
-                  accept="video/*"
+                  accept="video/*,.dav,.DAV"
                   className="sr-only"
-                  onChange={(e) => {
+                  onChange={async (e) => {
                     const file = e.target.files?.[0];
                     if (file) {
                       setVideoName(file.name);
                       setVideoFile(file);
                       setError(""); // Clear any previous errors
+
+                      // Check if it's a DAV file
+                      const isDavFile = file.name
+                        .toLowerCase()
+                        .endsWith(".dav");
+                      if (isDavFile) {
+                        setError(
+                          "⚠️ Arquivo .DAV detectado: O corte de vídeo pode não funcionar corretamente com este formato. Recomendamos converter para MP4 primeiro."
+                        );
+                        setEnableVideoCutting(false); // Disable cutting for DAV files
+                        setVideoDuration(0);
+                        return;
+                      }
+
+                      // Get video duration (only for standard video formats)
+                      try {
+                        const duration = await getVideoDuration(file);
+                        setVideoDuration(duration);
+                        setEndTime(Math.min(duration, 60)); // Default to 60 seconds or full video
+                      } catch (error) {
+                        console.warn(
+                          "Não foi possível obter duração do vídeo:",
+                          error
+                        );
+                        setVideoDuration(0);
+                        setEnableVideoCutting(false); // Disable cutting if duration detection fails
+                      }
                     }
                   }}
                   required
@@ -463,9 +687,9 @@ export default function Home() {
 
                   <input
                     type="range"
-                    min="0"
+                    min={minSeconds}
                     max={maxSeconds}
-                    step="30"
+                    step="5"
                     value={currentSeconds}
                     onChange={(e) =>
                       handleSliderChange(parseInt(e.target.value))
@@ -485,13 +709,11 @@ export default function Home() {
                 <div className="p-3 rounded-lg bg-white/5 border border-white/10">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs text-muted">
-                      {maxFrames === 0
-                        ? "Vídeo completo será processado"
-                        : "Processamento limitado"}
+                      Processamento limitado aos primeiros{" "}
+                      {getTimeDescription(maxFrames)}
                     </span>
                     <span className="text-xs text-muted">
-                      {maxFrames === 0 ? "∞" : `${maxFrames.toLocaleString()}`}{" "}
-                      frames
+                      {maxFrames.toLocaleString()} frames
                     </span>
                   </div>
 
@@ -518,9 +740,107 @@ export default function Home() {
                     </div>
                   )}
                 </div>
+                
+                <p className="text-xs text-muted/80 mt-2">
+                  📹 Range: 5 segundos - 10 minutos (ajuste de 5 em 5 segundos)
+                </p>
 
                 <input type="hidden" name="maxframes" value={maxFrames} />
               </div>
+
+              {/* Video Cutting Section */}
+              {videoDuration > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <label className="block text-sm text-muted">
+                      Corte de vídeo (opcional)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setEnableVideoCutting(!enableVideoCutting)}
+                      disabled={isProcessing}
+                      className={`px-3 py-1 rounded text-xs transition-colors ${
+                        enableVideoCutting
+                          ? "bg-[var(--brand)] text-white"
+                          : "bg-white/10 text-muted hover:bg-white/20"
+                      }`}
+                    >
+                      {enableVideoCutting ? "Habilitado" : "Desabilitado"}
+                    </button>
+                  </div>
+
+                  {enableVideoCutting && (
+                    <div className="space-y-3">
+                      <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                        <p className="text-xs text-blue-400 mb-2">
+                          ℹ️ O vídeo será cortado no navegador antes do envio
+                        </p>
+                        <p className="text-xs text-muted">
+                          Duração total: {Math.floor(videoDuration / 60)}:
+                          {String(Math.floor(videoDuration % 60)).padStart(
+                            2,
+                            "0"
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-muted mb-1">
+                            Início (segundos)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max={Math.floor(videoDuration)}
+                            value={startTime}
+                            onChange={(e) =>
+                              setStartTime(
+                                Math.max(0, parseInt(e.target.value) || 0)
+                              )
+                            }
+                            disabled={isProcessing}
+                            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-foreground focus:border-[var(--brand)]/50 focus:ring-1 focus:ring-[var(--brand)]/50 disabled:opacity-50"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-muted mb-1">
+                            Fim (segundos)
+                          </label>
+                          <input
+                            type="number"
+                            min={startTime + 1}
+                            max={Math.floor(videoDuration)}
+                            value={endTime}
+                            onChange={(e) =>
+                              setEndTime(
+                                Math.min(
+                                  videoDuration,
+                                  parseInt(e.target.value) || videoDuration
+                                )
+                              )
+                            }
+                            disabled={isProcessing}
+                            className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-foreground focus:border-[var(--brand)]/50 focus:ring-1 focus:ring-[var(--brand)]/50 disabled:opacity-50"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded bg-white/5 border border-white/10">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-muted">Duração do corte:</span>
+                          <span className="text-foreground font-medium">
+                            {Math.floor((endTime - startTime) / 60)}:
+                            {String(
+                              Math.floor((endTime - startTime) % 60)
+                            ).padStart(2, "0")}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm text-muted mb-2">Classes</label>
@@ -613,9 +933,24 @@ export default function Home() {
                           </div>
                         )}
                         <div className="text-xs text-muted flex-1">
-                          <div>Job ID: {jobId}</div>
+                          <div>Job ID: {jobId || "Processando..."}</div>
                           <div>Arquivo: {videoName}</div>
                           <div>Classes: {selected.length} selecionadas</div>
+                          {enableVideoCutting && (
+                            <div>
+                              Corte: {startTime}s - {endTime}s (
+                              {Math.floor((endTime - startTime) / 60)}:
+                              {String(
+                                Math.floor((endTime - startTime) % 60)
+                              ).padStart(2, "0")}
+                              )
+                            </div>
+                          )}
+                          {isProcessingVideo && (
+                            <div className="text-yellow-400">
+                              🎬 Cortando vídeo no navegador...
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -624,6 +959,12 @@ export default function Home() {
                         downloadCompleted &&
                         !isDownloading && (
                           <div className="mt-3 pt-3 border-t border-white/10">
+                            <div className="mb-2 p-2 rounded bg-yellow-500/10 border border-yellow-500/20">
+                              <p className="text-xs text-yellow-400">
+                                ⚠️ O job será automaticamente removido após o
+                                download
+                              </p>
+                            </div>
                             <button
                               type="button"
                               onClick={() => downloadProcessedVideo(jobId)}
