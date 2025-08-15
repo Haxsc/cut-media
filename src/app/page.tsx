@@ -172,7 +172,7 @@ export default function Home() {
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-    } catch (err) {
+    } catch {
       throw new Error("Falha no download automático");
     }
   }

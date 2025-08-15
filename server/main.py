@@ -13,15 +13,6 @@ from typing import Optional, List
 
 app = FastAPI(title="Cut Media API", description="API para processamento de vídeos com YOLO")
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js dev server
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Diretórios
 UPLOAD_DIR = Path("uploads")
 JOBS_DIR = Path("jobs")

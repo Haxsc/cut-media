@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
-import path from "node:path";
 import { jobPaths } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -15,7 +14,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Not ready" }, { status: 404 });
   const stat = await fs.promises.stat(output);
   const stream = fs.createReadStream(output);
-  return new NextResponse(stream as any, {
+  return new NextResponse(stream as unknown as ReadableStream, {
     headers: {
       "Content-Type": "video/mp4",
       "Content-Length": String(stat.size),

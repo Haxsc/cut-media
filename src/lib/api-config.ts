@@ -1,7 +1,7 @@
 // Configuração da API
 export const API_CONFIG = {
   // URL base da API Python
-  BASE_URL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
+  BASE_URL: process.env.NEXT_PUBLIC_API_URL || "http://192.168.100.194:8000",
 
   // Endpoints
   ENDPOINTS: {
