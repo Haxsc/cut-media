@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import Select from "@/components/Select";
 import { API_CONFIG, buildApiUrl } from "@/lib/api-config";
 
@@ -44,6 +44,19 @@ export default function Home() {
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [error, setError] = useState<string>("");
   const [jobId, setJobId] = useState<string>("");
+  const [isDownloading, setIsDownloading] = useState<boolean>(false);
+  const [downloadCompleted, setDownloadCompleted] = useState<boolean>(false);
+  const [pollingIntervalRef, setPollingIntervalRef] =
+    useState<NodeJS.Timeout | null>(null);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef) {
+        clearInterval(pollingIntervalRef);
+      }
+    };
+  }, [pollingIntervalRef]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -95,21 +108,26 @@ export default function Home() {
       await pollProcessingStatus(newJobId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro desconhecido");
-      setIsProcessing(false);
-      setProcessingStage("");
-      setProcessingProgress(0);
+      resetProcessingState();
     }
   }
 
   async function pollProcessingStatus(jobId: string) {
     setProcessingStage("Processando vídeo com IA...");
 
-    const pollInterval = setInterval(async () => {
+    // Limpar qualquer polling anterior
+    if (pollingIntervalRef) {
+      clearInterval(pollingIntervalRef);
+    }
+
+    const interval = setInterval(async () => {
       try {
         const statusResponse = await fetch(
           buildApiUrl(API_CONFIG.ENDPOINTS.STATUS, { id: jobId })
         );
         const status = await statusResponse.json();
+
+        console.log(`[Polling] Status atual:`, status);
 
         if (status.stage) {
           setProcessingStage(status.stage);
@@ -119,49 +137,69 @@ export default function Home() {
           setProcessingProgress(Math.min(status.progress, 90));
         }
 
+        // Verificar se o processamento foi concluído
         if (status.status === "completed") {
-          clearInterval(pollInterval);
-          setProcessingStage("Download iniciando...");
-          setProcessingProgress(95);
+          console.log(`[Polling] Processamento concluído!`);
 
-          // Auto download
-          await downloadProcessedVideo(jobId);
+          // Parar o polling imediatamente
+          clearInterval(interval);
+          setPollingIntervalRef(null);
 
+          // Marcar como processamento concluído
+          setDownloadCompleted(true);
           setProcessingProgress(100);
-          setProcessingStage("Concluído!");
+          setProcessingStage("Processamento concluído - Pronto para download");
 
-          // Reset after 3 seconds
-          setTimeout(() => {
-            setIsProcessing(false);
-            setProcessingStage("");
-            setProcessingProgress(0);
-            setJobId("");
-          }, 3000);
+          // Não fazer download automático, apenas mostrar o botão
         }
 
         if (status.status === "failed" || status.error) {
-          clearInterval(pollInterval);
+          clearInterval(interval);
+          setPollingIntervalRef(null);
           throw new Error(status.error || "Erro no processamento");
         }
       } catch (err) {
-        clearInterval(pollInterval);
+        console.error(`[Polling] Erro:`, err);
+        clearInterval(interval);
+        setPollingIntervalRef(null);
         setError(err instanceof Error ? err.message : "Erro no status");
-        setIsProcessing(false);
-        setProcessingStage("");
-        setProcessingProgress(0);
+        resetProcessingState();
       }
     }, API_CONFIG.POLLING.INTERVAL);
+
+    setPollingIntervalRef(interval);
+  }
+
+  function resetProcessingState() {
+    setIsProcessing(false);
+    setProcessingStage("");
+    setProcessingProgress(0);
+    setJobId("");
+    setIsDownloading(false);
+    setDownloadCompleted(false);
+    setError("");
+    if (pollingIntervalRef) {
+      clearInterval(pollingIntervalRef);
+      setPollingIntervalRef(null);
+    }
   }
 
   async function downloadProcessedVideo(jobId: string) {
+    console.log(`[Download] Iniciando download para job ${jobId}`);
+
+    setIsDownloading(true);
+    setProcessingStage("Baixando arquivo...");
+
     try {
       const response = await fetch(
         buildApiUrl(API_CONFIG.ENDPOINTS.DOWNLOAD, { id: jobId })
       );
 
       if (!response.ok) {
-        throw new Error("Erro no download");
+        throw new Error(`Erro no download: ${response.status}`);
       }
+
+      console.log(`[Download] Download bem-sucedido`);
 
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
@@ -172,11 +210,21 @@ export default function Home() {
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-    } catch {
-      throw new Error("Falha no download automático");
+
+      setProcessingStage("Download concluído!");
+      console.log(`[Download] Arquivo baixado com sucesso`);
+
+      // Reset após 2 segundos
+      setTimeout(() => {
+        resetProcessingState();
+      }, 2000);
+    } catch (error) {
+      console.error(`[Download] Erro:`, error);
+      setError("Falha no download");
+      setIsDownloading(false);
+      setProcessingStage("Erro no download - Tente novamente");
     }
   }
-
   function toggleClass(id: number) {
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
@@ -213,7 +261,7 @@ export default function Home() {
             </div>
             <div>
               <h1 className="text-xl font-semibold tracking-tight">
-                Cut Media
+                Cut Media 1.1.4
               </h1>
               <p className="text-xs text-muted">IA Video Trimmer</p>
             </div>
@@ -544,13 +592,71 @@ export default function Home() {
                     {/* Processing details */}
                     <div className="mt-3 p-3 rounded-lg bg-white/5 border border-white/10">
                       <div className="flex items-center gap-3">
-                        <div className="h-5 w-5 rounded-full border-2 border-[var(--brand)] border-t-transparent animate-spin"></div>
-                        <div className="text-xs text-muted">
+                        {processingProgress < 100 && (
+                          <div className="h-5 w-5 rounded-full border-2 border-[var(--brand)] border-t-transparent animate-spin"></div>
+                        )}
+                        {processingProgress === 100 && (
+                          <div className="h-5 w-5 rounded-full bg-green-500 flex items-center justify-center">
+                            <svg
+                              className="h-3 w-3 text-white"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M5 13l4 4L19 7"
+                              />
+                            </svg>
+                          </div>
+                        )}
+                        <div className="text-xs text-muted flex-1">
                           <div>Job ID: {jobId}</div>
                           <div>Arquivo: {videoName}</div>
                           <div>Classes: {selected.length} selecionadas</div>
                         </div>
                       </div>
+
+                      {/* Botão de download quando processamento estiver concluído */}
+                      {processingProgress === 100 &&
+                        downloadCompleted &&
+                        !isDownloading && (
+                          <div className="mt-3 pt-3 border-t border-white/10">
+                            <button
+                              type="button"
+                              onClick={() => downloadProcessedVideo(jobId)}
+                              disabled={isDownloading}
+                              className="w-full px-4 py-2 bg-[var(--brand)] hover:bg-[var(--brand-600)] text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                              <svg
+                                className="h-4 w-4"
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                                />
+                              </svg>
+                              Baixar Vídeo Processado
+                            </button>
+                          </div>
+                        )}
+
+                      {/* Indicador de download em progresso */}
+                      {isDownloading && (
+                        <div className="mt-3 pt-3 border-t border-white/10 text-center">
+                          <div className="flex items-center justify-center gap-2 text-xs text-muted">
+                            <div className="h-3 w-3 rounded-full border border-[var(--brand)] border-t-transparent animate-spin"></div>
+                            Baixando arquivo...
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

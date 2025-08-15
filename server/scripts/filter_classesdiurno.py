@@ -2,7 +2,17 @@ import numpy as np
 import cv2
 import glob
 import argparse
+import os
+import torch
+import torch.nn as nn
 from ultralytics import YOLO
+
+# Patch torch.load to use weights_only=False for compatibility with older model files
+os.environ['TORCH_WARN_WEIGHTS_ONLY'] = '0'
+original_torch_load = torch.load
+def patched_torch_load(f, map_location=None, pickle_module=None, weights_only=None, **kwargs):
+    return original_torch_load(f, map_location=map_location, pickle_module=pickle_module, weights_only=False, **kwargs)
+torch.load = patched_torch_load
 
 # termination criteria
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -28,6 +38,7 @@ def undistort_video(video_path,calibration_file_path,output_video_file_path,fps=
     #cv2.namedWindow("undistort", cv2.WINDOW_NORMAL)
     #cv2.resizeWindow("undistort", 600, 600)
     
+    # Load YOLO model (torch.load is already patched above)
     model = YOLO('/data/models/diurnov5.1.pt')
     
     
@@ -129,9 +140,14 @@ def undistort_video(video_path,calibration_file_path,output_video_file_path,fps=
             if (acc_errors>1000000):
                 break
 
-    # Release the video capture object and close the display window
+    # Release the video capture object and video writer
     cap.release()
+    if writer is not None:
+        writer.release()
+        print("Video writer released")
     #cv2.destroyAllWindows()
+    
+    print("Video processing completed successfully")
 
 
 if __name__ == "__main__":

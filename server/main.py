@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import json
 import uuid
+import sys
 from datetime import datetime
 from pathlib import Path
 import asyncio
@@ -13,11 +14,24 @@ from typing import Optional, List
 
 app = FastAPI(title="Cut Media API", description="API para processamento de vídeos com YOLO")
 
+origins = [
+    "http://192.168.100.194:3000",
+    # "*" -> todas as origens
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Diretórios
 UPLOAD_DIR = Path("uploads")
 JOBS_DIR = Path("jobs")
 MODELS_DIR = Path("/data/models")
-SCRIPTS_DIR = Path("server/scripts")
+SCRIPTS_DIR = Path("scripts")
 
 # Criar diretórios se não existirem
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -27,23 +41,19 @@ JOBS_DIR.mkdir(exist_ok=True)
 YOLO_MODELS = {
     "diurno": {
         "script": "filter_classesdiurno.py",
-        "model_path": "/data/models/diurnov5.1.pt"
     },
     "diurnoangulado": {
         "script": "filter_classesDiurnoAngulado.py", 
-        "model_path": "/data/models/diurnoanguladov5.pt"
     },
     "noturno": {
         "script": "filter_classesnight.py",
-        "model_path": "/data/models/noturnov5.pt" 
     },
     "noturnoangulado": {
         "script": "filter_classesNoturnoAngulado.py",
-        "model_path": "/data/models/noturnoanguladov5.pt"
     },
     "noturnoiluminado": {
         "script": "filter_classesnotilu.py",
-        "model_path": "/data/models/noturnoiluminadov5.pt"
+
     }
 }
 
@@ -140,13 +150,27 @@ async def process_video(job_id: str):
         model_info = YOLO_MODELS[job.parameters["model"]]
         script_path = SCRIPTS_DIR / model_info["script"]
         
+        # Verificar se o script existe
+        if not script_path.exists():
+            raise Exception(f"Script não encontrado: {script_path}")
+        
+        # Usar o mesmo Python executable que está executando este script
+        python_executable = sys.executable
+        
+        print(f"[Job {job_id}] Working directory: {os.getcwd()}")
+        print(f"[Job {job_id}] Script path: {script_path}")
+        print(f"[Job {job_id}] Input path: {input_path}")
+        print(f"[Job {job_id}] Output path: {output_path}")
+        
         cmd = [
-            "python", str(script_path),
+            python_executable, str(script_path),
             "--video", str(input_path),
             "--output", str(output_path),
-            "--fps", "30",
-            "--maxframes", str(job.parameters["maxframes"])
         ]
+
+        if str(job.parameters["maxframes"]) != "0":
+            cmd.extend(["--maxframes", str(job.parameters["maxframes"])])
+    
         
         # Adicionar calibração se necessário
         if job.parameters["calibration"] == "sim":
@@ -160,48 +184,59 @@ async def process_video(job_id: str):
         if job.parameters["classes"]:
             classes_str = ",".join(map(str, job.parameters["classes"]))
             cmd.extend(["--classes", classes_str])
-        
         # Atualizar progresso
         job.stage = "Executando detecção YOLO"
         job.progress = 40
         
-        # Executar o script
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        print(f"[Job {job_id}] Executando comando: {' '.join(cmd)}")
         
-        # Simular progresso baseado no tempo estimado
-        max_wait = 300  # 5 minutos máximo
-        wait_interval = 2  # Check a cada 2 segundos
-        elapsed = 0
+        # Atualizar progresso antes de executar
+        job.progress = 50
+        job.stage = "Processando vídeo com YOLO"
         
-        while process.poll() is None and elapsed < max_wait:
-            await asyncio.sleep(wait_interval)
-            elapsed += wait_interval
+        # Executar o script de forma mais simples
+        try:
+            print(f"[Job {job_id}] Iniciando execução...")
             
-            # Atualizar progresso baseado no tempo decorrido
-            progress = min(40 + (elapsed / max_wait) * 40, 80)
-            job.progress = int(progress)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=None,  # Sem timeout
+                cwd=os.getcwd(),
+                env=os.environ.copy(),
+                check=False  # Não levanta exceção automaticamente
+            )
             
-            if elapsed % 10 == 0:  # Atualizar stage a cada 10 segundos
-                job.stage = f"Processando vídeo... {elapsed}s"
-        
-        # Verificar resultado
-        if process.poll() is None:
-            process.terminate()
-            raise Exception("Timeout no processamento do vídeo")
-        
-        stdout, stderr = process.communicate()
-        
-        if process.returncode != 0:
-            raise Exception(f"Erro no script Python: {stderr}")
+            print(f"[Job {job_id}] Processo terminou com código: {result.returncode}")
+            print(f"[Job {job_id}] STDOUT: {result.stdout[:1000]}{'...' if len(result.stdout) > 1000 else ''}")
+            print(f"[Job {job_id}] STDERR: {result.stderr[:1000]}{'...' if len(result.stderr) > 1000 else ''}")
+            
+            # Atualizar progresso
+            job.progress = 90
+            job.stage = "Verificando arquivo de saída"
+            
+            if result.returncode != 0:
+                print(f"[Job {job_id}] Erro no processo. Código de retorno: {result.returncode}")
+                raise Exception(f"Erro no script Python: {result.stderr}")
+                
+        except subprocess.TimeoutExpired as e:
+            print(f"[Job {job_id}] Timeout no processo: {str(e)}")
+            raise Exception(f"Timeout no processamento: {str(e)}")
+        except Exception as e:
+            print(f"[Job {job_id}] Erro durante execução: {str(e)}")
+            raise e
         
         # Verificar se arquivo de saída foi criado
+        print(f"[Job {job_id}] Verificando se arquivo de saída existe: {output_path}")
         if not output_path.exists():
+            print(f"[Job {job_id}] Arquivo de saída não encontrado!")
+            # Listar arquivos no diretório do job para debug
+            job_files = list(job_dir.glob("*"))
+            print(f"[Job {job_id}] Arquivos no diretório do job: {job_files}")
             raise Exception("Arquivo de saída não foi gerado")
+        
+        print(f"[Job {job_id}] Processamento concluído com sucesso!")
         
         # Sucesso!
         job.status = "completed"
@@ -211,6 +246,7 @@ async def process_video(job_id: str):
         
     except Exception as e:
         # Erro
+        print(f"[Job {job_id}] Erro durante processamento: {str(e)}")
         job.status = "failed"
         job.stage = "Erro no processamento"
         job.error = str(e)
@@ -247,14 +283,56 @@ async def download_video(id: str):
         raise HTTPException(status_code=400, detail="Processamento ainda não foi concluído")
     
     output_path = JOBS_DIR / id / "output.mp4"
+    
+    print(f"[Download] Download solicitado para job {id}")
+    print(f"[Download] Caminho do arquivo: {output_path}")
+    print(f"[Download] Arquivo existe: {output_path.exists()}")
+    
+    if output_path.exists():
+        file_size = output_path.stat().st_size
+        print(f"[Download] Tamanho do arquivo: {file_size} bytes")
+    
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Arquivo de saída não encontrado")
+    
+    filename = f"{job.file_name.split('.')[0]}_processed.mp4"
+    print(f"[Download] Nome do arquivo para download: {filename}")
     
     return FileResponse(
         path=str(output_path),
         media_type="video/mp4",
-        filename=f"{job.file_name.split('.')[0]}_processed.mp4"
+        filename=filename,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
     )
+
+@app.get("/api/file-info/{job_id}")
+async def get_file_info(job_id: str):
+    """Obter informações sobre o arquivo processado"""
+    job = jobs_status.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job não encontrado")
+    
+    output_path = JOBS_DIR / job_id / "output.mp4"
+    input_path = JOBS_DIR / job_id / "input.mp4"
+    
+    file_info = {
+        "job_id": job_id,
+        "status": job.status,
+        "input_file": {
+            "exists": input_path.exists(),
+            "size": input_path.stat().st_size if input_path.exists() else 0
+        },
+        "output_file": {
+            "exists": output_path.exists(),
+            "size": output_path.stat().st_size if output_path.exists() else 0,
+            "path": str(output_path)
+        }
+    }
+    
+    return file_info
 
 @app.get("/api/jobs")
 async def list_jobs():
